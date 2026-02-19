@@ -14,6 +14,21 @@
       --danger: #ff5f78;
       --warn: #ffcb66;
       --ok: #57f09a;
+      --zone-guard: #ff5f7833;
+      --zone-camera: #4ed0ff33;
+    }
+
+    body[data-theme="high-contrast"] {
+      --bg: #000;
+      --panel: #090909;
+      --text: #fff;
+      --muted: #c6c6c6;
+      --accent: #00e1ff;
+      --danger: #ff4d4d;
+      --warn: #ffd400;
+      --ok: #49ff94;
+      --zone-guard: #ff4d4d66;
+      --zone-camera: #00e1ff66;
     }
 
     * {
@@ -149,6 +164,31 @@
       background: #112236;
     }
 
+    .settings-mini,
+    .meta-mini,
+    .records-mini {
+      border-top: 1px solid #203149;
+      margin-top: 8px;
+      padding-top: 8px;
+      font-size: 12px;
+      color: var(--muted);
+      display: grid;
+      gap: 3px;
+    }
+
+    .records-mini table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 11px;
+    }
+
+    .records-mini th,
+    .records-mini td {
+      border-bottom: 1px dashed #203149;
+      padding: 2px;
+      text-align: left;
+    }
+
     .terminal-log {
       min-height: 140px;
       max-height: 200px;
@@ -212,6 +252,21 @@
       background: #112236;
     }
 
+    .menu textarea {
+      width: 100%;
+      min-height: 110px;
+      resize: vertical;
+      background: #0a1220;
+      border: 1px solid #27405d;
+      color: var(--text);
+      font: inherit;
+      padding: 8px;
+      margin-top: 8px;
+    }
+
+    .cell.zone-guard { box-shadow: inset 0 0 0 999px var(--zone-guard); }
+    .cell.zone-camera { box-shadow: inset 0 0 0 999px var(--zone-camera); }
+
     @media (max-width: 900px) {
       .main { grid-template-columns: 1fr; }
     }
@@ -236,6 +291,9 @@
         <div class="stat"><span>Objectives</span><span>Reach EXIT</span></div>
         <div class="stat"><span>Build</span><span>Prototype</span></div>
         <div class="seed-actions"><button id="copy-seed" type="button">Copy seed</button></div>
+        <div class="settings-mini" id="settings-mini"></div>
+        <div class="meta-mini" id="meta-mini"></div>
+        <div class="records-mini" id="records-mini"></div>
       </aside>
     </main>
 
@@ -248,28 +306,22 @@
       <button data-action="new-random">New Run (random)</button>
       <button data-action="daily">Daily Run</button>
       <button data-action="continue">Continue</button>
+      <button data-action="pause">Pause / Resume</button>
       <button data-action="help">How to play</button>
       <button data-action="settings">Settings</button>
+      <button data-action="export-save">Export save JSON</button>
+      <button data-action="import-save">Import save JSON</button>
+      <textarea id="save-transfer" placeholder="Paste save JSON here for import or export will appear here"></textarea>
     </div>
   </div>
 
   <script>
     const TILE_GLYPH = {
-      floor: '.',
-      wall: '#',
-      door: '+',
-      terminal: 'T',
-      exit: 'X',
-      extraction: 'E',
-      core: 'C'
+      floor: '.', wall: '#', door: '+', terminal: 'T', exit: 'X', extraction: 'E', core: 'C'
     };
 
     const LEVEL_OBJECTIVES = [
-      'Reach exit node',
-      'Reach exit node',
-      'Reach exit node',
-      'Reach exit node',
-      'Download CORE (5 turns) then EXTRACT'
+      'Reach exit node', 'Reach exit node', 'Reach exit node', 'Reach exit node', 'Download CORE (5 turns) then EXTRACT'
     ];
 
     const gameState = {
@@ -290,11 +342,28 @@
       downloadProgress: 0,
       downloadNeeded: 5,
       random: Math.random,
+      logs: [],
+      maxLog: 80,
+      paused: false,
+      settings: {
+        threatZones: true,
+        animations: true,
+        theme: 'dark',
+        keybindHints: true
+      },
+      meta: {
+        credits: 0,
+        metaXP: 0,
+        unlocked: ['scanner-mk1']
+      },
+      leaderboard: {
+        bestRandom: 0,
+        bestDaily: 0,
+        entries: []
+      },
       entities: {
         player: { x: 1, y: 1, glyph: '@', emp: 0 },
-        guards: [],
-        cameras: [],
-        items: []
+        guards: [], cameras: [], items: []
       },
       dom: {
         grid: document.getElementById('grid'),
@@ -305,40 +374,25 @@
         daily: document.getElementById('daily-value'),
         menu: document.getElementById('menu-overlay'),
         objective: document.querySelector('.stat:nth-of-type(3) span:last-child'),
-        copySeed: document.getElementById('copy-seed')
+        copySeed: document.getElementById('copy-seed'),
+        settingsMini: document.getElementById('settings-mini'),
+        metaMini: document.getElementById('meta-mini'),
+        recordsMini: document.getElementById('records-mini'),
+        transfer: document.getElementById('save-transfer')
       },
       cellEls: [],
 
       rng: {
-        hashString(seedStr) {
-          let h = 2166136261;
-          for (let i = 0; i < seedStr.length; i++) {
-            h ^= seedStr.charCodeAt(i);
-            h = Math.imul(h, 16777619);
-          }
-          return h >>> 0;
-        },
-        mulberry32(a) {
-          return () => {
-            let t = (a += 0x6D2B79F5);
-            t = Math.imul(t ^ (t >>> 15), t | 1);
-            t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-            return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-          };
-        },
-        create(seedValue) {
-          const seedInt = this.hashString(String(seedValue));
-          return this.mulberry32(seedInt || 1);
-        }
+        hashString(seedStr) { let h = 2166136261; for (let i = 0; i < seedStr.length; i++) { h ^= seedStr.charCodeAt(i); h = Math.imul(h, 16777619); } return h >>> 0; },
+        mulberry32(a) { return () => { let t = (a += 0x6D2B79F5); t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; },
+        create(seedValue) { const seedInt = this.hashString(String(seedValue)); return this.mulberry32(seedInt || 1); }
       },
 
       utils: {
         idx(state, x, y) { return y * state.width + x; },
         inBounds(state, x, y) { return x >= 0 && y >= 0 && x < state.width && y < state.height; },
         manhattan(a, b) { return Math.abs(a.x - b.x) + Math.abs(a.y - b.y); },
-        isWalkableTile(tile) {
-          return tile !== 'wall' && tile !== 'door';
-        },
+        isWalkableTile(tile) { return tile !== 'wall' && tile !== 'door'; },
         bfsDistance(state, start, targets) {
           const queue = [{ x: start.x, y: start.y, dist: 0 }];
           const seen = new Set([`${start.x},${start.y}`]);
@@ -347,15 +401,12 @@
             const node = queue.shift();
             if (wanted.has(`${node.x},${node.y}`)) return node.dist;
             for (const [dx, dy] of [[1,0],[-1,0],[0,1],[0,-1]]) {
-              const nx = node.x + dx;
-              const ny = node.y + dy;
+              const nx = node.x + dx; const ny = node.y + dy;
               if (!this.inBounds(state, nx, ny)) continue;
-              const key = `${nx},${ny}`;
-              if (seen.has(key)) continue;
+              const key = `${nx},${ny}`; if (seen.has(key)) continue;
               const tile = state.tiles[this.idx(state, nx, ny)];
               if (!this.isWalkableTile(tile)) continue;
-              seen.add(key);
-              queue.push({ x: nx, y: ny, dist: node.dist + 1 });
+              seen.add(key); queue.push({ x: nx, y: ny, dist: node.dist + 1 });
             }
           }
           return Infinity;
@@ -378,14 +429,10 @@
           return null;
         },
         los(state, x0, y0, x1, y1) {
-          let x = x0;
-          let y = y0;
-          const dx = Math.abs(x1 - x0);
-          const dy = Math.abs(y1 - y0);
-          const sx = x0 < x1 ? 1 : -1;
-          const sy = y0 < y1 ? 1 : -1;
+          let x = x0; let y = y0;
+          const dx = Math.abs(x1 - x0); const dy = Math.abs(y1 - y0);
+          const sx = x0 < x1 ? 1 : -1; const sy = y0 < y1 ? 1 : -1;
           let err = dx - dy;
-
           while (!(x === x1 && y === y1)) {
             const e2 = 2 * err;
             if (e2 > -dy) { err -= dy; x += sx; }
@@ -399,103 +446,48 @@
       },
 
       gen: {
-        carveRoom(state, tiles, room) {
-          for (let y = room.y; y < room.y + room.h; y++) {
-            for (let x = room.x; x < room.x + room.w; x++) {
-              tiles[y * state.width + x] = 'floor';
-            }
-          }
-        },
+        carveRoom(state, tiles, room) { for (let y = room.y; y < room.y + room.h; y++) for (let x = room.x; x < room.x + room.w; x++) tiles[y * state.width + x] = 'floor'; },
         carveLCorridor(state, tiles, a, b) {
           const horizontalFirst = state.random() < 0.5;
-          const carveLine = (x0, y0, x1, y1) => {
-            let x = x0;
-            let y = y0;
-            while (x !== x1 || y !== y1) {
-              tiles[y * state.width + x] = 'floor';
-              if (x !== x1) x += x < x1 ? 1 : -1;
-              else if (y !== y1) y += y < y1 ? 1 : -1;
-            }
-            tiles[y1 * state.width + x1] = 'floor';
-          };
-          if (horizontalFirst) {
-            carveLine(a.x, a.y, b.x, a.y);
-            carveLine(b.x, a.y, b.x, b.y);
-          } else {
-            carveLine(a.x, a.y, a.x, b.y);
-            carveLine(a.x, b.y, b.x, b.y);
-          }
+          const carveLine = (x0, y0, x1, y1) => { let x = x0; let y = y0; while (x !== x1 || y !== y1) { tiles[y * state.width + x] = 'floor'; if (x !== x1) x += x < x1 ? 1 : -1; else if (y !== y1) y += y < y1 ? 1 : -1; } tiles[y1 * state.width + x1] = 'floor'; };
+          if (horizontalFirst) { carveLine(a.x, a.y, b.x, a.y); carveLine(b.x, a.y, b.x, b.y); }
+          else { carveLine(a.x, a.y, a.x, b.y); carveLine(a.x, b.y, b.x, b.y); }
         },
         surroundFloorsWithWalls(state, tiles) {
-          for (let y = 1; y < state.height - 1; y++) {
-            for (let x = 1; x < state.width - 1; x++) {
-              const i = y * state.width + x;
-              if (tiles[i] !== 'void') continue;
-              let nearFloor = false;
-              for (let yy = -1; yy <= 1; yy++) {
-                for (let xx = -1; xx <= 1; xx++) {
-                  if (xx === 0 && yy === 0) continue;
-                  if (tiles[(y + yy) * state.width + (x + xx)] === 'floor') nearFloor = true;
-                }
-              }
-              if (nearFloor) tiles[i] = 'wall';
+          for (let y = 1; y < state.height - 1; y++) for (let x = 1; x < state.width - 1; x++) {
+            const i = state.utils.idx(state, x, y);
+            if (tiles[i] !== 'floor') continue;
+            for (const [dx,dy] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+              const ni = state.utils.idx(state, x + dx, y + dy);
+              if (tiles[ni] === 'void') tiles[ni] = 'wall';
             }
           }
-          for (let i = 0; i < tiles.length; i++) {
-            if (tiles[i] === 'void') tiles[i] = 'wall';
-          }
+          for (let i = 0; i < tiles.length; i++) if (tiles[i] === 'void') tiles[i] = 'wall';
         },
         roomsConnected(state, tiles, rooms) {
           if (!rooms.length) return false;
           const start = rooms[0].center;
-          const queue = [start];
-          const seen = new Set([`${start.x},${start.y}`]);
-          while (queue.length) {
-            const cur = queue.shift();
-            for (const [dx, dy] of [[1,0],[-1,0],[0,1],[0,-1]]) {
-              const nx = cur.x + dx;
-              const ny = cur.y + dy;
-              if (!state.utils.inBounds(state, nx, ny)) continue;
-              const key = `${nx},${ny}`;
-              if (seen.has(key)) continue;
-              const t = tiles[ny * state.width + nx];
-              if (t !== 'floor') continue;
-              seen.add(key);
-              queue.push({ x: nx, y: ny });
-            }
-          }
-          return rooms.every((room) => seen.has(`${room.center.x},${room.center.y}`));
+          const targets = rooms.slice(1).map(r => r.center);
+          return state.utils.bfsDistance({ ...state, tiles }, start, targets) !== Infinity;
         },
         map(state) {
-          for (let attempt = 0; attempt < 60; attempt++) {
-            const tiles = Array.from({ length: state.width * state.height }, () => 'void');
+          for (let attempt = 0; attempt < 28; attempt++) {
+            const tiles = Array(state.width * state.height).fill('void');
             const rooms = [];
-            const roomCount = 6 + Math.floor(state.random() * 5);
-
-            for (let i = 0; i < roomCount * 3 && rooms.length < roomCount; i++) {
-              const w = 3 + Math.floor(state.random() * 5);
-              const h = 3 + Math.floor(state.random() * 4);
+            for (let i = 0; i < 11; i++) {
+              const w = 4 + Math.floor(state.random() * 5); const h = 4 + Math.floor(state.random() * 4);
               const x = 1 + Math.floor(state.random() * (state.width - w - 2));
               const y = 1 + Math.floor(state.random() * (state.height - h - 2));
-              const candidate = { x, y, w, h, center: { x: x + Math.floor(w / 2), y: y + Math.floor(h / 2) } };
-              const overlaps = rooms.some((room) =>
-                candidate.x < room.x + room.w + 1 &&
-                candidate.x + candidate.w + 1 > room.x &&
-                candidate.y < room.y + room.h + 1 &&
-                candidate.y + candidate.h + 1 > room.y);
-              if (overlaps) continue;
+              const candidate = { x, y, w, h, center: { x: x + Math.floor(w/2), y: y + Math.floor(h/2) } };
+              const overlap = rooms.some(r => x < r.x + r.w + 1 && x + w + 1 > r.x && y < r.y + r.h + 1 && y + h + 1 > r.y);
+              if (overlap) continue;
               this.carveRoom(state, tiles, candidate);
-              if (rooms.length > 0) {
-                this.carveLCorridor(state, tiles, rooms[rooms.length - 1].center, candidate.center);
-              }
+              if (rooms.length) this.carveLCorridor(state, tiles, rooms[rooms.length - 1].center, candidate.center);
               rooms.push(candidate);
             }
-
             if (rooms.length < 6) continue;
             this.surroundFloorsWithWalls(state, tiles);
-
             if (!this.roomsConnected(state, tiles, rooms)) continue;
-
             state.tiles = tiles;
             state.generatedRooms = rooms;
             state.memory = Array(tiles.length).fill(false);
@@ -506,134 +498,75 @@
         },
         ensureReachability(state, origin, targetTileNames) {
           const targets = [];
-          for (let y = 0; y < state.height; y++) {
-            for (let x = 0; x < state.width; x++) {
-              const tile = state.tiles[state.utils.idx(state, x, y)];
-              if (targetTileNames.includes(tile)) targets.push({ x, y });
-            }
+          for (let y = 0; y < state.height; y++) for (let x = 0; x < state.width; x++) {
+            const tile = state.tiles[state.utils.idx(state, x, y)]; if (targetTileNames.includes(tile)) targets.push({ x, y });
           }
           return state.utils.bfsDistance(state, origin, targets) !== Infinity;
         },
         populate(state) {
-          state.entities.guards = [];
-          state.entities.cameras = [];
-          state.entities.items = [];
-
+          state.entities.guards = []; state.entities.cameras = []; state.entities.items = [];
           const roomCenters = state.generatedRooms.map((r) => ({ ...r.center }));
           const spawn = roomCenters.shift();
           state.entities.player = { ...spawn, glyph: '@', emp: state.entities.player.emp || 0 };
-
           const endpoint = roomCenters.pop() || state.utils.randomFloor(state);
           const objectiveTile = state.floor === 5 ? 'core' : 'exit';
           state.tiles[state.utils.idx(state, endpoint.x, endpoint.y)] = objectiveTile;
-
           if (state.floor === 5) {
             const extraction = roomCenters.pop() || state.utils.randomFloor(state);
             state.tiles[state.utils.idx(state, extraction.x, extraction.y)] = 'extraction';
           }
-
           const terminalCount = Math.max(1, 1 + Math.floor(state.random() * 2));
           for (let i = 0; i < terminalCount; i++) {
             const terminal = state.utils.randomFloor(state);
             state.tiles[state.utils.idx(state, terminal.x, terminal.y)] = 'terminal';
           }
-
           const pickupCount = 1 + Math.floor(state.random() * 3);
           for (let i = 0; i < pickupCount; i++) {
             const pos = state.utils.randomFloor(state);
             state.entities.items.push({ ...pos, glyph: i === 0 ? '⚡' : '•', type: i === 0 ? 'emp' : 'scrap', used: false });
           }
-
-          let doorCount = 0;
-          for (let y = 1; y < state.height - 1; y++) {
-            for (let x = 1; x < state.width - 1; x++) {
-              const i = state.utils.idx(state, x, y);
-              if (state.tiles[i] !== 'floor') continue;
-              const left = state.tiles[state.utils.idx(state, x - 1, y)];
-              const right = state.tiles[state.utils.idx(state, x + 1, y)];
-              const up = state.tiles[state.utils.idx(state, x, y - 1)];
-              const down = state.tiles[state.utils.idx(state, x, y + 1)];
-              const horizontalGate = left === 'wall' && right === 'wall' && up === 'floor' && down === 'floor';
-              const verticalGate = up === 'wall' && down === 'wall' && left === 'floor' && right === 'floor';
-              if ((horizontalGate || verticalGate) && state.random() < 0.2) {
-                state.tiles[i] = 'door';
-                doorCount += 1;
-              }
-            }
+          for (let y = 1; y < state.height - 1; y++) for (let x = 1; x < state.width - 1; x++) {
+            const i = state.utils.idx(state, x, y); if (state.tiles[i] !== 'floor') continue;
+            const left = state.tiles[state.utils.idx(state, x - 1, y)], right = state.tiles[state.utils.idx(state, x + 1, y)], up = state.tiles[state.utils.idx(state, x, y - 1)], down = state.tiles[state.utils.idx(state, x, y + 1)];
+            const horizontalGate = left === 'wall' && right === 'wall' && up === 'floor' && down === 'floor';
+            const verticalGate = up === 'wall' && down === 'wall' && left === 'floor' && right === 'floor';
+            if ((horizontalGate || verticalGate) && state.random() < 0.2) state.tiles[i] = 'door';
           }
-          for (let i = 0; i < 20 && doorCount < 2; i++) {
-            const p = state.utils.randomFloor(state);
-            state.tiles[state.utils.idx(state, p.x, p.y)] = 'door';
-            doorCount += 1;
-          }
-
           const guardCount = Math.min(7, 1 + state.floor + Math.floor(state.floor / 2));
           const camCount = Math.min(5, Math.floor((state.floor + 1) / 2));
-          for (let i = 0; i < guardCount; i++) {
-            const pos = state.utils.randomFloor(state);
-            state.entities.guards.push({ ...pos, glyph: 'G', state: 'patrol', hearing: 3 + state.floor, vision: 6 + Math.floor(state.floor / 2), target: null, searchTurns: 0 });
-          }
-          for (let i = 0; i < camCount; i++) {
-            const pos = state.utils.randomFloor(state);
-            state.entities.cameras.push({ ...pos, glyph: 'C', type: i % 2 ? 'fixed' : 'rotating', angle: Math.floor(state.random() * 4), range: 5 + Math.floor(state.floor / 2), disabled: 0 });
-          }
-
+          for (let i = 0; i < guardCount; i++) state.entities.guards.push({ ...state.utils.randomFloor(state), glyph: 'G', state: 'patrol', hearing: 3 + state.floor, vision: 6 + Math.floor(state.floor / 2), target: null, searchTurns: 0 });
+          for (let i = 0; i < camCount; i++) state.entities.cameras.push({ ...state.utils.randomFloor(state), glyph: 'C', type: i % 2 ? 'fixed' : 'rotating', angle: Math.floor(state.random() * 4), range: 5 + Math.floor(state.floor / 2), disabled: 0 });
           const goalTiles = state.floor === 5 ? ['core'] : ['exit'];
-          if (!this.ensureReachability(state, state.entities.player, goalTiles)) {
-            throw new Error('Player cannot reach level objective');
-          }
-          if (state.floor === 5 && !this.ensureReachability(state, state.entities.player, ['extraction'])) {
-            throw new Error('Player cannot reach extraction');
-          }
+          if (!this.ensureReachability(state, state.entities.player, goalTiles)) throw new Error('Player cannot reach level objective');
+          if (state.floor === 5 && !this.ensureReachability(state, state.entities.player, ['extraction'])) throw new Error('Player cannot reach extraction');
         }
       },
 
-      fov: {
-        recalc(state) {
-          state.visible.fill(false);
-          const r = 8;
-          const p = state.entities.player;
-          for (let y = p.y - r; y <= p.y + r; y++) {
-            for (let x = p.x - r; x <= p.x + r; x++) {
-              if (!state.utils.inBounds(state, x, y)) continue;
-              const d = Math.abs(x - p.x) + Math.abs(y - p.y);
-              if (d > r) continue;
-              if (state.utils.los(state, p.x, p.y, x, y)) {
-                const i = state.utils.idx(state, x, y);
-                state.visible[i] = true;
-                state.memory[i] = true;
-              }
-            }
-          }
+      fov: { recalc(state) {
+        state.visible.fill(false); const r = 8; const p = state.entities.player;
+        for (let y = p.y - r; y <= p.y + r; y++) for (let x = p.x - r; x <= p.x + r; x++) {
+          if (!state.utils.inBounds(state, x, y)) continue;
+          const d = Math.abs(x - p.x) + Math.abs(y - p.y); if (d > r) continue;
+          if (state.utils.los(state, p.x, p.y, x, y)) { const i = state.utils.idx(state, x, y); state.visible[i] = true; state.memory[i] = true; }
         }
-      },
+      }},
 
-      detection: {
-        update(state) {
-          const p = state.entities.player;
-          let seen = false;
-          for (const g of state.entities.guards) {
-            if (state.utils.manhattan(g, p) <= g.vision && state.utils.los(state, g.x, g.y, p.x, p.y)) seen = true;
-          }
-          for (const c of state.entities.cameras) {
-            if (c.disabled > 0) continue;
-            if (state.utils.manhattan(c, p) <= c.range && state.utils.los(state, c.x, c.y, p.x, p.y)) seen = true;
-          }
-
-          if (seen) {
-            state.exposure = Math.min(3, state.exposure + 1);
-            state.alertLevel = Math.min(100, state.alertLevel + 8 + state.exposure * 4);
-          } else {
-            state.exposure = Math.max(0, state.exposure - 1);
-            state.alertLevel = Math.max(0, state.alertLevel - 5);
-          }
+      detection: { update(state) {
+        const p = state.entities.player; let seen = false;
+        for (const g of state.entities.guards) if (state.utils.manhattan(g, p) <= g.vision && state.utils.los(state, g.x, g.y, p.x, p.y)) seen = true;
+        for (const c of state.entities.cameras) { if (c.disabled > 0) continue; if (state.utils.manhattan(c, p) <= c.range && state.utils.los(state, c.x, c.y, p.x, p.y)) seen = true; }
+        if (seen) {
+          if (state.exposure === 0) state.render.log(state, 'Detection started: hostiles have line of sight.', 'danger');
+          state.exposure = Math.min(3, state.exposure + 1); state.alertLevel = Math.min(100, state.alertLevel + 8 + state.exposure * 4);
+        } else {
+          if (state.exposure > 0) state.render.log(state, 'Detection lost: signal cooling down.', 'warn');
+          state.exposure = Math.max(0, state.exposure - 1); state.alertLevel = Math.max(0, state.alertLevel - 5);
         }
-      },
+      }},
 
       ai: {
         stepToward(state, actor, tx, ty) {
-          const opts = [[1,0],[-1,0],[0,1],[0,-1]].map(([dx,dy]) => ({ x: actor.x + dx, y: actor.y + dy }))
-            .filter(p => state.rules.canMove(state, p.x, p.y));
+          const opts = [[1,0],[-1,0],[0,1],[0,-1]].map(([dx,dy]) => ({ x: actor.x + dx, y: actor.y + dy })).filter(p => state.rules.canMove(state, p.x, p.y));
           opts.sort((a,b)=> (Math.abs(a.x-tx)+Math.abs(a.y-ty)) - (Math.abs(b.x-tx)+Math.abs(b.y-ty)));
           if (opts[0]) { actor.x = opts[0].x; actor.y = opts[0].y; }
         },
@@ -643,130 +576,75 @@
             const dist = state.utils.manhattan(g, p);
             const sees = dist <= g.vision && state.utils.los(state, g.x, g.y, p.x, p.y);
             const hears = dist <= g.hearing && state.noise > 0;
-
-            if (sees || state.alertLevel >= 70) {
-              g.state = 'alert';
-              g.target = { x: p.x, y: p.y };
-            } else if (hears) {
-              g.state = 'investigate';
-              g.target = { x: p.x, y: p.y };
-            } else if (g.state === 'investigate' && g.target && g.x === g.target.x && g.y === g.target.y) {
-              g.state = 'search';
-              g.searchTurns = 3;
-            } else if (g.state === 'search') {
-              g.searchTurns -= 1;
-              if (g.searchTurns <= 0) {
-                g.state = 'patrol';
-                g.target = state.utils.randomFloor(state);
-              }
-            } else if (!g.target || (g.x === g.target.x && g.y === g.target.y)) {
-              g.state = 'patrol';
-              g.target = state.utils.randomFloor(state);
-            }
-
+            if (sees || state.alertLevel >= 70) { g.state = 'alert'; g.target = { x: p.x, y: p.y }; }
+            else if (hears) { g.state = 'investigate'; g.target = { x: p.x, y: p.y }; state.render.log(state, 'Guard investigating your noise.', 'warn'); }
+            else if (g.state === 'investigate' && g.target && g.x === g.target.x && g.y === g.target.y) { g.state = 'search'; g.searchTurns = 3; }
+            else if (g.state === 'search') { g.searchTurns -= 1; if (g.searchTurns <= 0) { g.state = 'patrol'; g.target = state.utils.randomFloor(state); } }
+            else if (!g.target || (g.x === g.target.x && g.y === g.target.y)) { g.state = 'patrol'; g.target = state.utils.randomFloor(state); }
             if (g.target) this.stepToward(state, g, g.target.x, g.target.y);
-            if (g.x === p.x && g.y === p.y) {
-              state.hp -= 1;
-              state.render.log(state, 'Guard hit you.', 'danger');
-            }
+            if (g.x === p.x && g.y === p.y) { state.hp -= 1; state.render.log(state, 'Guard hit you.', 'danger'); }
           }
         },
-        stepCameras(state) {
-          for (const c of state.entities.cameras) {
-            if (c.disabled > 0) { c.disabled -= 1; continue; }
-            if (c.type === 'rotating') c.angle = (c.angle + 1) % 4;
-          }
-        }
+        stepCameras(state) { for (const c of state.entities.cameras) { if (c.disabled > 0) { c.disabled -= 1; continue; } if (c.type === 'rotating') c.angle = (c.angle + 1) % 4; } }
       },
 
       rules: {
-        canMove(state, x, y) {
-          if (!state.utils.inBounds(state, x, y)) return false;
-          const tile = state.tiles[state.utils.idx(state, x, y)];
-          if (tile === 'wall') return false;
-          if (tile === 'door') return false;
-          return true;
-        },
+        canMove(state, x, y) { if (!state.utils.inBounds(state, x, y)) return false; const tile = state.tiles[state.utils.idx(state, x, y)]; return tile !== 'wall' && tile !== 'door'; },
         playerAction(state, action) {
           if (action.type === 'move') {
-            const tx = state.entities.player.x + action.dx;
-            const ty = state.entities.player.y + action.dy;
+            const tx = state.entities.player.x + action.dx, ty = state.entities.player.y + action.dy;
             if (this.canMove(state, tx, ty)) {
-              state.entities.player.x = tx;
-              state.entities.player.y = ty;
-              state.noise = Math.max(0, 2 - state.entities.player.emp);
+              state.entities.player.x = tx; state.entities.player.y = ty; state.noise = Math.max(0, 2 - state.entities.player.emp);
+              state.render.log(state, `Move to (${tx},${ty}).`, 'ok');
             }
           }
-          if (action.type === 'wait') state.noise = 0;
+          if (action.type === 'wait') { state.noise = 0; state.render.log(state, 'Waited one turn.', 'ok'); }
           if (action.type === 'emp' && state.entities.player.emp > 0) {
             state.entities.player.emp -= 1;
-            for (const c of state.entities.cameras) {
-              if (state.utils.manhattan(c, state.entities.player) <= 3) c.disabled = 4;
-            }
+            for (const c of state.entities.cameras) if (state.utils.manhattan(c, state.entities.player) <= 3) c.disabled = 4;
             state.render.log(state, 'EMP pulse: cameras disabled for 4 turns.', 'warn');
           }
         },
         systemUpdate(state) {
-          const p = state.entities.player;
-          const i = state.utils.idx(state, p.x, p.y);
-          const tile = state.tiles[i];
-
-          for (const item of state.entities.items) {
-            if (!item.used && item.x === p.x && item.y === p.y) {
-              item.used = true;
-              if (item.type === 'emp') {
-                state.entities.player.emp += 2;
-                state.render.log(state, 'Picked EMP charge (+2).');
-              }
+          const p = state.entities.player; const i = state.utils.idx(state, p.x, p.y); const tile = state.tiles[i];
+          for (const item of state.entities.items) if (!item.used && item.x === p.x && item.y === p.y) {
+            item.used = true;
+            if (item.type === 'emp') { state.entities.player.emp += 2; state.render.log(state, 'Picked EMP charge (+2).'); }
+            else { state.meta.credits += 2; state.render.log(state, 'Collected scrap (+2 credits).'); }
+          }
+          if (tile === 'terminal') {
+            state.meta.metaXP += 1;
+            state.render.log(state, 'Terminal accessed: +1 metaXP.', 'ok');
+            if (state.meta.metaXP >= 5 && !state.meta.unlocked.includes('silent-boots')) {
+              state.meta.unlocked.push('silent-boots');
+              state.render.log(state, 'Module unlocked: silent-boots.', 'ok');
             }
           }
-
           if (state.floor < 5 && tile === 'exit') {
-            state.floor += 1;
-            state.render.log(state, `Floor ${state.floor} entered.`);
-            startFloor(state);
-            return true;
+            state.floor += 1; state.meta.metaXP += 2;
+            state.render.log(state, `Floor ${state.floor} entered.`); startFloor(state); return true;
           }
-
           if (state.floor === 5 && tile === 'core' && state.downloadProgress < state.downloadNeeded) {
-            state.downloadProgress += 1;
-            state.render.log(state, `Core download ${state.downloadProgress}/${state.downloadNeeded}.`, 'warn');
+            state.downloadProgress += 1; state.render.log(state, `Core download ${state.downloadProgress}/${state.downloadNeeded}.`, 'warn');
           }
-
           if (state.floor === 5 && tile === 'extraction' && state.downloadProgress >= state.downloadNeeded) {
-            state.mode = 'menu';
-            state.dom.menu.style.display = 'grid';
-            state.render.log(state, 'Run complete: Core exfiltration successful.', 'ok');
+            state.mode = 'menu'; state.dom.menu.style.display = 'grid'; state.render.log(state, 'Run complete: Core exfiltration successful.', 'ok');
+            finalizeRun(state, true);
           }
           return false;
         },
         outcomeCheck(state) {
           if (state.hp <= 0 || state.exposure >= 3 || state.alertLevel >= 100) {
-            state.mode = 'menu';
-            state.dom.menu.style.display = 'grid';
-            state.render.log(state, 'Mission failed: you were compromised.', 'danger');
+            state.mode = 'menu'; state.dom.menu.style.display = 'grid'; state.render.log(state, 'Mission failed: you were compromised.', 'danger');
+            finalizeRun(state, false);
           }
         },
         processTurn(state, action) {
-          if (state.mode !== 'running') return;
-
-          // A: Input -> action
+          if (state.mode !== 'running' || state.paused) return;
           this.playerAction(state, action);
-          // B: Action resolved above
-          // C: System updates
-          const changedFloor = this.systemUpdate(state);
-          if (changedFloor) return;
-          state.fov.recalc(state);
-          state.detection.update(state);
-          // D: Enemy turn
-          state.ai.stepCameras(state);
-          state.ai.stepGuards(state);
-          // E: Outcome checks
-          this.outcomeCheck(state);
-
-          state.turn += 1;
-          state.render.frame(state);
-          state.storage.save(state);
+          const changedFloor = this.systemUpdate(state); if (changedFloor) return;
+          state.fov.recalc(state); state.detection.update(state); state.ai.stepCameras(state); state.ai.stepGuards(state); this.outcomeCheck(state);
+          state.turn += 1; state.render.frame(state); state.ui.updatePanels(state); state.storage.saveRun(state);
         }
       },
 
@@ -774,184 +652,188 @@
         createGridOnce(state) {
           if (state.cellEls.length) return;
           const frag = document.createDocumentFragment();
-          for (let i = 0; i < state.width * state.height; i++) {
-            const el = document.createElement('div');
-            el.className = 'cell';
-            el.textContent = ' ';
-            state.cellEls.push(el);
-            frag.appendChild(el);
-          }
+          for (let i = 0; i < state.width * state.height; i++) { const el = document.createElement('div'); el.className = 'cell'; el.textContent = ' '; state.cellEls.push(el); frag.appendChild(el); }
           state.dom.grid.appendChild(frag);
         },
-        frame(state) {
-          for (let y = 0; y < state.height; y++) {
-            for (let x = 0; x < state.width; x++) {
-              const i = state.utils.idx(state, x, y);
-              const cell = state.cellEls[i];
-              if (!state.memory[i]) {
-                cell.className = 'cell';
-                cell.style.opacity = 0.1;
-                cell.textContent = ' ';
-                continue;
-              }
-              const tile = state.tiles[i];
-              cell.className = `cell tile-${tile}`;
-              cell.style.opacity = state.visible[i] ? 1 : 0.38;
-              cell.textContent = TILE_GLYPH[tile] || '?';
+        threatZones(state) {
+          if (!state.settings.threatZones) return;
+          const applyZone = (x, y, range, cls) => {
+            for (let yy = y - range; yy <= y + range; yy++) for (let xx = x - range; xx <= x + range; xx++) {
+              if (!state.utils.inBounds(state, xx, yy)) continue;
+              if (Math.abs(xx - x) + Math.abs(yy - y) > range) continue;
+              const i = state.utils.idx(state, xx, yy);
+              if (!state.memory[i]) continue;
+              state.cellEls[i].classList.add(cls);
             }
-          }
-
-          const draw = (e, css, glyph = e.glyph) => {
-            const i = state.utils.idx(state, e.x, e.y);
-            if (!state.visible[i]) return;
-            const cell = state.cellEls[i];
-            cell.className = `cell ${css}`;
-            cell.textContent = glyph;
           };
-
+          for (const g of state.entities.guards) applyZone(g.x, g.y, Math.min(3, g.vision), 'zone-guard');
+          for (const c of state.entities.cameras) if (c.disabled === 0) applyZone(c.x, c.y, Math.min(3, c.range), 'zone-camera');
+        },
+        frame(state) {
+          for (let y = 0; y < state.height; y++) for (let x = 0; x < state.width; x++) {
+            const i = state.utils.idx(state, x, y), cell = state.cellEls[i];
+            if (!state.memory[i]) { cell.className = 'cell'; cell.style.opacity = 0.1; cell.textContent = ' '; continue; }
+            const tile = state.tiles[i]; cell.className = `cell tile-${tile}`; cell.style.opacity = state.visible[i] ? 1 : 0.38; cell.textContent = TILE_GLYPH[tile] || '?';
+          }
+          const draw = (e, css, glyph = e.glyph) => { const i = state.utils.idx(state, e.x, e.y); if (!state.visible[i]) return; const cell = state.cellEls[i]; cell.className = `cell ${css}`; cell.textContent = glyph; };
           draw(state.entities.player, 'tile-player');
           for (const g of state.entities.guards) draw(g, 'tile-enemy', 'G');
           for (const c of state.entities.cameras) draw(c, 'tile-enemy', c.disabled > 0 ? 'c' : 'C');
           for (const item of state.entities.items) if (!item.used) draw(item, 'tile-floor', item.glyph);
-
-          const obj = LEVEL_OBJECTIVES[state.floor - 1];
-          state.dom.objective.textContent = obj;
-          state.dom.statusLeft.textContent = `HP:${state.hp} Noise:${state.noise} Turn:${state.turn} Exposure:${state.exposure} Alert:${state.alertLevel}`;
-          state.dom.statusRight.textContent = `Mode:${state.mode} Floor:${state.floor}/5 Download:${state.downloadProgress}/${state.downloadNeeded}`;
+          this.threatZones(state);
+          state.dom.objective.textContent = LEVEL_OBJECTIVES[state.floor - 1];
+          const hints = state.settings.keybindHints ? ' | Arrows move, Space wait, E EMP, Esc pause' : '';
+          state.dom.statusLeft.textContent = `HP:${state.hp} Noise:${state.noise} Turn:${state.turn} Exposure:${state.exposure} Alert:${state.alertLevel}${hints}`;
+          state.dom.statusRight.textContent = `Mode:${state.mode}${state.paused ? '(paused)' : ''} Floor:${state.floor}/5 Download:${state.downloadProgress}/${state.downloadNeeded}`;
           state.dom.seed.textContent = String(state.seed ?? '—');
           state.dom.daily.textContent = state.daily ? 'Yes' : 'No';
         },
         log(state, message, tone = 'ok') {
-          const p = document.createElement('p');
-          p.className = tone;
-          p.textContent = `> ${message}`;
-          state.dom.terminal.appendChild(p);
+          state.logs.push({ message, tone, at: new Date().toISOString() });
+          if (state.logs.length > state.maxLog) state.logs = state.logs.slice(-state.maxLog);
+          state.dom.terminal.innerHTML = '';
+          for (const row of state.logs) {
+            const p = document.createElement('p'); p.className = row.tone; p.textContent = `> ${row.message}`; state.dom.terminal.appendChild(p);
+          }
           state.dom.terminal.scrollTop = state.dom.terminal.scrollHeight;
         }
       },
 
-      storage: {
-        key: 'stealth-roguelite-save-v2',
-        save(state) {
-          const payload = {
-            turn: state.turn, hp: state.hp, noise: state.noise, mode: state.mode, daily: state.daily, seed: state.seed,
-            floor: state.floor, tiles: state.tiles, memory: state.memory, visible: state.visible, alertLevel: state.alertLevel,
-            exposure: state.exposure, downloadProgress: state.downloadProgress, entities: state.entities
-          };
-          localStorage.setItem(this.key, JSON.stringify(payload));
+      ui: {
+        applySettings(state) {
+          document.body.dataset.theme = state.settings.theme;
+          for (const el of state.cellEls) el.style.transition = state.settings.animations ? 'color 120ms ease, background 120ms ease' : 'none';
         },
-        load() {
-          const raw = localStorage.getItem(this.key);
-          return raw ? JSON.parse(raw) : null;
+        updatePanels(state) {
+          state.dom.settingsMini.innerHTML = `<strong>Settings</strong><div>Threat zones: ${state.settings.threatZones ? 'On' : 'Off'}</div><div>Animations: ${state.settings.animations ? 'On' : 'Off'}</div><div>Theme: ${state.settings.theme}</div><div>Hints: ${state.settings.keybindHints ? 'On' : 'Off'}</div>`;
+          state.dom.metaMini.innerHTML = `<strong>Meta</strong><div>Credits: ${state.meta.credits}</div><div>MetaXP: ${state.meta.metaXP}</div><div>Unlocked: ${state.meta.unlocked.join(', ')}</div>`;
+          const rows = state.leaderboard.entries.map((r) => `<tr><td>${r.mode}</td><td>${r.date}</td><td>${r.seed}</td><td>${r.score}</td></tr>`).join('');
+          state.dom.recordsMini.innerHTML = `<strong>Records</strong><div>Best random: ${state.leaderboard.bestRandom} | Best daily: ${state.leaderboard.bestDaily}</div><table><thead><tr><th>M</th><th>Date</th><th>Seed</th><th>Score</th></tr></thead><tbody>${rows || '<tr><td colspan="4">No runs yet</td></tr>'}</tbody></table>`;
+        }
+      },
+
+      storage: {
+        runKey: 'stealth-roguelite-save-v3', settingsKey: 'stealth-roguelite-settings-v1', boardKey: 'stealth-roguelite-records-v1', metaKey: 'stealth-roguelite-meta-v1',
+        saveRun(state) {
+          const payload = { turn: state.turn, hp: state.hp, noise: state.noise, mode: 'running', daily: state.daily, seed: state.seed, floor: state.floor, tiles: state.tiles, memory: state.memory, visible: state.visible, alertLevel: state.alertLevel, exposure: state.exposure, downloadProgress: state.downloadProgress, entities: state.entities, logs: state.logs, paused: false };
+          localStorage.setItem(this.runKey, JSON.stringify(payload));
+        },
+        loadRun() { const raw = localStorage.getItem(this.runKey); return raw ? JSON.parse(raw) : null; },
+        saveSettings(state) { localStorage.setItem(this.settingsKey, JSON.stringify(state.settings)); },
+        loadSettings() { const raw = localStorage.getItem(this.settingsKey); return raw ? JSON.parse(raw) : null; },
+        saveMeta(state) { localStorage.setItem(this.metaKey, JSON.stringify(state.meta)); },
+        loadMeta() { const raw = localStorage.getItem(this.metaKey); return raw ? JSON.parse(raw) : null; },
+        saveBoard(state) { localStorage.setItem(this.boardKey, JSON.stringify(state.leaderboard)); },
+        loadBoard() { const raw = localStorage.getItem(this.boardKey); return raw ? JSON.parse(raw) : null; },
+        exportRun(state) { const data = this.loadRun(); return JSON.stringify(data || {}, null, 2); },
+        importRun(state, raw) {
+          const parsed = JSON.parse(raw);
+          const required = ['turn','hp','noise','daily','seed','floor','tiles','memory','visible','alertLevel','exposure','downloadProgress','entities'];
+          for (const key of required) if (!(key in parsed)) throw new Error(`Missing field ${key}`);
+          localStorage.setItem(this.runKey, JSON.stringify(parsed));
+          state.render.log(state, 'Save JSON imported. Use Continue to load.', 'ok');
         }
       }
     };
 
+    function getLocalDateSeed() { const now = new Date(); const y = now.getFullYear(); const m = String(now.getMonth() + 1).padStart(2, '0'); const d = String(now.getDate()).padStart(2, '0'); return `${y}-${m}-${d}`; }
+    function currentDateTag() { return new Date().toISOString().slice(0, 10); }
+    function calcScore(state, win) { return Math.max(0, state.floor * 120 + state.turn + state.meta.metaXP * 10 + (win ? 400 : 0) - state.alertLevel); }
+
+    function finalizeRun(state, win) {
+      const score = calcScore(state, win);
+      const entry = { mode: state.daily ? 'daily' : 'random', date: currentDateTag(), seed: state.seed, score };
+      state.leaderboard.entries.unshift(entry);
+      state.leaderboard.entries = state.leaderboard.entries.slice(0, 10);
+      if (entry.mode === 'daily') state.leaderboard.bestDaily = Math.max(state.leaderboard.bestDaily, score);
+      else state.leaderboard.bestRandom = Math.max(state.leaderboard.bestRandom, score);
+      state.storage.saveBoard(state); state.storage.saveMeta(state); state.storage.saveRun(state); state.ui.updatePanels(state);
+      state.render.log(state, `Run archived. Score ${score}.`, win ? 'ok' : 'warn');
+    }
+
     function startFloor(state) {
       for (let attempt = 0; attempt < 20; attempt++) {
         try {
-          state.gen.map(state);
-          state.gen.populate(state);
-          state.fov.recalc(state);
-          state.render.frame(state);
-          state.storage.save(state);
-          return;
-        } catch (error) {
-          state.render.log(state, `Regenerating floor: ${error.message}.`, 'warn');
-        }
+          state.gen.map(state); state.gen.populate(state); state.fov.recalc(state); state.render.frame(state); state.ui.updatePanels(state); state.storage.saveRun(state); return;
+        } catch (error) { state.render.log(state, `Regenerating floor: ${error.message}.`, 'warn'); }
       }
       throw new Error('Unable to generate valid floor after retries');
     }
 
-    function getLocalDateSeed() {
-      const now = new Date();
-      const y = now.getFullYear();
-      const m = String(now.getMonth() + 1).padStart(2, '0');
-      const d = String(now.getDate()).padStart(2, '0');
-      return `${y}-${m}-${d}`;
-    }
-
     function initializeRun(type) {
-      const today = getLocalDateSeed();
-      const seed = type === 'daily' ? `daily-${today}` : `run-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
-      gameState.random = gameState.rng.create(seed);
-      gameState.turn = 1;
-      gameState.mode = 'running';
-      gameState.daily = type === 'daily';
-      gameState.seed = seed;
-      gameState.floor = 1;
-      gameState.hp = 10;
-      gameState.noise = 0;
-      gameState.alertLevel = 0;
-      gameState.exposure = 0;
-      gameState.downloadProgress = 0;
+      const today = getLocalDateSeed(); const seed = type === 'daily' ? `daily-${today}` : `run-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+      gameState.random = gameState.rng.create(seed); gameState.turn = 1; gameState.mode = 'running'; gameState.daily = type === 'daily'; gameState.seed = seed; gameState.floor = 1;
+      gameState.hp = 10; gameState.noise = 0; gameState.alertLevel = 0; gameState.exposure = 0; gameState.downloadProgress = 0; gameState.paused = false; gameState.logs = [];
       gameState.entities.player = { x: 1, y: 1, glyph: '@', emp: 0 };
-
-      startFloor(gameState);
-      gameState.render.log(gameState, `Run initialized with seed ${seed}`);
-      gameState.dom.menu.style.display = 'none';
+      startFloor(gameState); gameState.render.log(gameState, `Run initialized with seed ${seed}`); gameState.dom.menu.style.display = 'none';
     }
 
     function continueRun() {
-      const data = gameState.storage.load();
-      if (!data) {
-        gameState.render.log(gameState, 'No save found. Starting random run instead.', 'warn');
-        initializeRun('random');
-        return;
-      }
-      Object.assign(gameState, data);
-      gameState.random = gameState.rng.create(gameState.seed || `restore-${Date.now()}`);
-      gameState.mode = 'running';
-      gameState.fov.recalc(gameState);
+      const data = gameState.storage.loadRun();
+      if (!data || !data.tiles?.length) { gameState.render.log(gameState, 'No save found. Starting random run instead.', 'warn'); initializeRun('random'); return; }
+      Object.assign(gameState, data); gameState.random = gameState.rng.create(gameState.seed || `restore-${Date.now()}`); gameState.mode = 'running'; gameState.paused = false;
+      gameState.fov.recalc(gameState); gameState.render.frame(gameState); gameState.ui.updatePanels(gameState); gameState.render.log(gameState, 'Continue successful. Save restored.'); gameState.dom.menu.style.display = 'none';
+    }
+
+    function togglePause() {
+      if (gameState.mode !== 'running') return;
+      gameState.paused = !gameState.paused;
+      gameState.dom.menu.style.display = gameState.paused ? 'grid' : 'none';
+      gameState.render.log(gameState, gameState.paused ? 'Paused. Export/import available.' : 'Resumed run.', 'warn');
+      gameState.storage.saveRun(gameState);
       gameState.render.frame(gameState);
-      gameState.render.log(gameState, 'Continue successful. Save restored.');
-      gameState.dom.menu.style.display = 'none';
+    }
+
+    function cycleSettings() {
+      gameState.settings.threatZones = !gameState.settings.threatZones;
+      gameState.settings.animations = !gameState.settings.animations;
+      gameState.settings.theme = gameState.settings.theme === 'dark' ? 'high-contrast' : 'dark';
+      gameState.settings.keybindHints = !gameState.settings.keybindHints;
+      gameState.ui.applySettings(gameState); gameState.ui.updatePanels(gameState); gameState.storage.saveSettings(gameState);
+      gameState.render.log(gameState, 'Settings cycled and saved to localStorage.', 'ok'); gameState.render.frame(gameState);
     }
 
     gameState.render.createGridOnce(gameState);
+    const loadedSettings = gameState.storage.loadSettings(); if (loadedSettings) gameState.settings = { ...gameState.settings, ...loadedSettings };
+    const loadedMeta = gameState.storage.loadMeta(); if (loadedMeta) gameState.meta = { ...gameState.meta, ...loadedMeta };
+    const loadedBoard = gameState.storage.loadBoard(); if (loadedBoard) gameState.leaderboard = { ...gameState.leaderboard, ...loadedBoard };
+    gameState.ui.applySettings(gameState); gameState.ui.updatePanels(gameState);
     gameState.render.log(gameState, 'Boot sequence complete. Choose startup option.');
 
-
     gameState.dom.copySeed.addEventListener('click', async () => {
-      if (!gameState.seed) {
-        gameState.render.log(gameState, 'No active seed to copy.', 'warn');
-        return;
-      }
-      try {
-        await navigator.clipboard.writeText(String(gameState.seed));
-        gameState.render.log(gameState, `Seed copied: ${gameState.seed}`);
-      } catch {
-        gameState.render.log(gameState, 'Clipboard unavailable in this environment.', 'warn');
-      }
+      if (!gameState.seed) { gameState.render.log(gameState, 'No active seed to copy.', 'warn'); return; }
+      try { await navigator.clipboard.writeText(String(gameState.seed)); gameState.render.log(gameState, `Seed copied: ${gameState.seed}`); }
+      catch { gameState.render.log(gameState, 'Clipboard unavailable in this environment.', 'warn'); }
     });
 
     document.querySelector('.menu').addEventListener('click', (event) => {
-      const btn = event.target.closest('button[data-action]');
-      if (!btn) return;
-      const action = btn.dataset.action;
-
+      const btn = event.target.closest('button[data-action]'); if (!btn) return; const action = btn.dataset.action;
       if (action === 'new-random') initializeRun('random');
       if (action === 'daily') initializeRun('daily');
       if (action === 'continue') continueRun();
-      if (action === 'help') gameState.render.log(gameState, 'Arrows move, Space wait, E uses EMP near cameras.', 'warn');
-      if (action === 'settings') gameState.render.log(gameState, 'Settings are not implemented in this prototype.', 'danger');
+      if (action === 'pause') togglePause();
+      if (action === 'help') gameState.render.log(gameState, 'Arrows move, Space wait, E uses EMP near cameras, Esc pause.', 'warn');
+      if (action === 'settings') cycleSettings();
+      if (action === 'export-save') {
+        gameState.dom.transfer.value = gameState.storage.exportRun(gameState);
+        gameState.render.log(gameState, 'Save JSON exported to text area.', 'ok');
+      }
+      if (action === 'import-save') {
+        try { gameState.storage.importRun(gameState, gameState.dom.transfer.value); }
+        catch (error) { gameState.render.log(gameState, `Import failed: ${error.message}`, 'danger'); }
+      }
     });
 
     window.addEventListener('keydown', (event) => {
-      if (gameState.mode !== 'running') return;
+      if (event.key === 'Escape') { event.preventDefault(); togglePause(); return; }
+      if (gameState.mode !== 'running' || gameState.paused) return;
       const moves = { ArrowUp: [0, -1], ArrowDown: [0, 1], ArrowLeft: [-1, 0], ArrowRight: [1, 0] };
       let action = null;
-      if (moves[event.key]) {
-        const [dx, dy] = moves[event.key];
-        action = { type: 'move', dx, dy };
-      } else if (event.key === ' ' || event.key.toLowerCase() === 'z') {
-        action = { type: 'wait' };
-      } else if (event.key.toLowerCase() === 'e') {
-        action = { type: 'emp' };
-      }
+      if (moves[event.key]) { const [dx, dy] = moves[event.key]; action = { type: 'move', dx, dy }; }
+      else if (event.key === ' ' || event.key.toLowerCase() === 'z') action = { type: 'wait' };
+      else if (event.key.toLowerCase() === 'e') action = { type: 'emp' };
       if (!action) return;
-      event.preventDefault();
-      gameState.rules.processTurn(gameState, action);
+      event.preventDefault(); gameState.rules.processTurn(gameState, action);
     });
   </script>
 
