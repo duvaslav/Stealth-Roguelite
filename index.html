@@ -231,6 +231,24 @@
   </div>
 
   <script>
+    const TILE_GLYPH = {
+      floor: '.',
+      wall: '#',
+      door: '+',
+      terminal: 'T',
+      exit: 'X',
+      extraction: 'E',
+      core: 'C'
+    };
+
+    const LEVEL_OBJECTIVES = [
+      'Reach exit node',
+      'Reach exit node',
+      'Reach exit node',
+      'Reach exit node',
+      'Download CORE (5 turns) then EXTRACT'
+    ];
+
     const gameState = {
       width: 24,
       height: 16,
@@ -238,13 +256,22 @@
       mode: 'menu',
       hp: 10,
       noise: 0,
+      alertLevel: 0,
+      exposure: 0,
       daily: false,
       seed: null,
+      floor: 1,
       tiles: [],
+      memory: [],
+      visible: [],
+      downloadProgress: 0,
+      downloadNeeded: 5,
+      random: Math.random,
       entities: {
-        player: { x: 1, y: 1, glyph: '@' },
-        enemy: { x: 11, y: 8, glyph: 'E' },
-        exit: { x: 22, y: 14, glyph: 'X' }
+        player: { x: 1, y: 1, glyph: '@', emp: 0 },
+        guards: [],
+        cameras: [],
+        items: []
       },
       dom: {
         grid: document.getElementById('grid'),
@@ -253,7 +280,8 @@
         statusRight: document.getElementById('status-right'),
         seed: document.getElementById('seed-value'),
         daily: document.getElementById('daily-value'),
-        menu: document.getElementById('menu-overlay')
+        menu: document.getElementById('menu-overlay'),
+        objective: document.querySelector('.stat:nth-of-type(3) span:last-child')
       },
       cellEls: [],
 
@@ -284,47 +312,277 @@
         }
       },
 
-      gen: {
-        map(state, random) {
-          const tiles = Array.from({ length: state.width * state.height }, () => 'floor');
-          for (let y = 0; y < state.height; y++) {
-            for (let x = 0; x < state.width; x++) {
-              const i = y * state.width + x;
-              const isBorder = x === 0 || y === 0 || x === state.width - 1 || y === state.height - 1;
-              if (isBorder || random() < 0.08) tiles[i] = 'wall';
-            }
+      utils: {
+        idx(state, x, y) { return y * state.width + x; },
+        inBounds(state, x, y) { return x >= 0 && y >= 0 && x < state.width && y < state.height; },
+        manhattan(a, b) { return Math.abs(a.x - b.x) + Math.abs(a.y - b.y); },
+        randomFloor(state) {
+          while (true) {
+            const x = 1 + Math.floor(state.random() * (state.width - 2));
+            const y = 1 + Math.floor(state.random() * (state.height - 2));
+            const tile = state.tiles[this.idx(state, x, y)];
+            const occupied = this.getEntityAt(state, x, y);
+            if (tile === 'floor' && !occupied) return { x, y };
           }
-          tiles[state.entities.player.y * state.width + state.entities.player.x] = 'floor';
-          tiles[state.entities.enemy.y * state.width + state.entities.enemy.x] = 'floor';
-          tiles[state.entities.exit.y * state.width + state.entities.exit.x] = 'floor';
-          state.tiles = tiles;
-        }
-      },
+        },
+        getEntityAt(state, x, y) {
+          if (state.entities.player.x === x && state.entities.player.y === y) return state.entities.player;
+          for (const guard of state.entities.guards) if (guard.x === x && guard.y === y) return guard;
+          for (const cam of state.entities.cameras) if (cam.x === x && cam.y === y) return cam;
+          for (const item of state.entities.items) if (item.x === x && item.y === y && !item.used) return item;
+          return null;
+        },
+        los(state, x0, y0, x1, y1) {
+          let x = x0;
+          let y = y0;
+          const dx = Math.abs(x1 - x0);
+          const dy = Math.abs(y1 - y0);
+          const sx = x0 < x1 ? 1 : -1;
+          const sy = y0 < y1 ? 1 : -1;
+          let err = dx - dy;
 
-      fov: {
-        isVisible() {
+          while (!(x === x1 && y === y1)) {
+            const e2 = 2 * err;
+            if (e2 > -dy) { err -= dy; x += sx; }
+            if (e2 < dx) { err += dx; y += sy; }
+            if (x === x1 && y === y1) return true;
+            const t = state.tiles[this.idx(state, x, y)];
+            if (t === 'wall' || t === 'door') return false;
+          }
           return true;
         }
       },
 
+      gen: {
+        map(state) {
+          const tiles = Array.from({ length: state.width * state.height }, () => 'floor');
+          for (let y = 0; y < state.height; y++) {
+            for (let x = 0; x < state.width; x++) {
+              const i = y * state.width + x;
+              if (x === 0 || y === 0 || x === state.width - 1 || y === state.height - 1 || state.random() < 0.08 + state.floor * 0.01) {
+                tiles[i] = 'wall';
+              }
+            }
+          }
+          for (let i = 0; i < 8; i++) {
+            const p = state.utils.randomFloor({ ...state, tiles, entities: { player: {x:-1,y:-1}, guards: [], cameras: [], items: [] } });
+            tiles[p.y * state.width + p.x] = 'door';
+          }
+          state.tiles = tiles;
+          state.memory = Array(tiles.length).fill(false);
+          state.visible = Array(tiles.length).fill(false);
+        },
+        populate(state) {
+          state.entities.player = { ...state.utils.randomFloor(state), glyph: '@', emp: state.entities.player.emp || 0 };
+          state.entities.guards = [];
+          state.entities.cameras = [];
+          state.entities.items = [];
+
+          const guardCount = 2 + state.floor;
+          const camCount = 1 + Math.floor(state.floor / 2);
+          for (let i = 0; i < guardCount; i++) {
+            const pos = state.utils.randomFloor(state);
+            state.entities.guards.push({ ...pos, glyph: 'G', state: 'patrol', hearing: 4 + state.floor, vision: 7, target: null, searchTurns: 0 });
+          }
+          for (let i = 0; i < camCount; i++) {
+            const pos = state.utils.randomFloor(state);
+            state.entities.cameras.push({ ...pos, glyph: 'C', type: i % 2 ? 'fixed' : 'rotating', angle: Math.floor(state.random() * 4), range: 6, disabled: 0 });
+          }
+          for (let i = 0; i < 3; i++) {
+            const pos = state.utils.randomFloor(state);
+            state.entities.items.push({ ...pos, glyph: i === 0 ? '⚡' : '•', type: i === 0 ? 'emp' : 'scrap', used: false });
+          }
+
+          const terminal = state.utils.randomFloor(state);
+          state.tiles[state.utils.idx(state, terminal.x, terminal.y)] = 'terminal';
+          const objective = state.utils.randomFloor(state);
+          state.tiles[state.utils.idx(state, objective.x, objective.y)] = state.floor === 5 ? 'core' : 'exit';
+          if (state.floor === 5) {
+            const extraction = state.utils.randomFloor(state);
+            state.tiles[state.utils.idx(state, extraction.x, extraction.y)] = 'extraction';
+          }
+        }
+      },
+
+      fov: {
+        recalc(state) {
+          state.visible.fill(false);
+          const r = 8;
+          const p = state.entities.player;
+          for (let y = p.y - r; y <= p.y + r; y++) {
+            for (let x = p.x - r; x <= p.x + r; x++) {
+              if (!state.utils.inBounds(state, x, y)) continue;
+              const d = Math.abs(x - p.x) + Math.abs(y - p.y);
+              if (d > r) continue;
+              if (state.utils.los(state, p.x, p.y, x, y)) {
+                const i = state.utils.idx(state, x, y);
+                state.visible[i] = true;
+                state.memory[i] = true;
+              }
+            }
+          }
+        }
+      },
+
+      detection: {
+        update(state) {
+          const p = state.entities.player;
+          let seen = false;
+          for (const g of state.entities.guards) {
+            if (state.utils.manhattan(g, p) <= g.vision && state.utils.los(state, g.x, g.y, p.x, p.y)) seen = true;
+          }
+          for (const c of state.entities.cameras) {
+            if (c.disabled > 0) continue;
+            if (state.utils.manhattan(c, p) <= c.range && state.utils.los(state, c.x, c.y, p.x, p.y)) seen = true;
+          }
+
+          if (seen) {
+            state.exposure = Math.min(3, state.exposure + 1);
+            state.alertLevel = Math.min(100, state.alertLevel + 8 + state.exposure * 4);
+          } else {
+            state.exposure = Math.max(0, state.exposure - 1);
+            state.alertLevel = Math.max(0, state.alertLevel - 5);
+          }
+        }
+      },
+
       ai: {
-        stepEnemy(state) {
-          if (state.mode !== 'running') return;
-          const dx = Math.sign(state.entities.player.x - state.entities.enemy.x);
-          const dy = Math.sign(state.entities.player.y - state.entities.enemy.y);
-          state.entities.enemy.x += dx;
-          state.entities.enemy.y += dy;
+        stepToward(state, actor, tx, ty) {
+          const opts = [[1,0],[-1,0],[0,1],[0,-1]].map(([dx,dy]) => ({ x: actor.x + dx, y: actor.y + dy }))
+            .filter(p => state.rules.canMove(state, p.x, p.y));
+          opts.sort((a,b)=> (Math.abs(a.x-tx)+Math.abs(a.y-ty)) - (Math.abs(b.x-tx)+Math.abs(b.y-ty)));
+          if (opts[0]) { actor.x = opts[0].x; actor.y = opts[0].y; }
+        },
+        stepGuards(state) {
+          const p = state.entities.player;
+          for (const g of state.entities.guards) {
+            const dist = state.utils.manhattan(g, p);
+            const sees = dist <= g.vision && state.utils.los(state, g.x, g.y, p.x, p.y);
+            const hears = dist <= g.hearing && state.noise > 0;
+
+            if (sees || state.alertLevel >= 70) {
+              g.state = 'alert';
+              g.target = { x: p.x, y: p.y };
+            } else if (hears) {
+              g.state = 'investigate';
+              g.target = { x: p.x, y: p.y };
+            } else if (g.state === 'investigate' && g.target && g.x === g.target.x && g.y === g.target.y) {
+              g.state = 'search';
+              g.searchTurns = 3;
+            } else if (g.state === 'search') {
+              g.searchTurns -= 1;
+              if (g.searchTurns <= 0) {
+                g.state = 'patrol';
+                g.target = state.utils.randomFloor(state);
+              }
+            } else if (!g.target || (g.x === g.target.x && g.y === g.target.y)) {
+              g.state = 'patrol';
+              g.target = state.utils.randomFloor(state);
+            }
+
+            if (g.target) this.stepToward(state, g, g.target.x, g.target.y);
+            if (g.x === p.x && g.y === p.y) {
+              state.hp -= 1;
+              state.render.log(state, 'Guard hit you.', 'danger');
+            }
+          }
+        },
+        stepCameras(state) {
+          for (const c of state.entities.cameras) {
+            if (c.disabled > 0) { c.disabled -= 1; continue; }
+            if (c.type === 'rotating') c.angle = (c.angle + 1) % 4;
+          }
         }
       },
 
       rules: {
         canMove(state, x, y) {
-          if (x < 0 || y < 0 || x >= state.width || y >= state.height) return false;
-          return state.tiles[y * state.width + x] !== 'wall';
+          if (!state.utils.inBounds(state, x, y)) return false;
+          const tile = state.tiles[state.utils.idx(state, x, y)];
+          if (tile === 'wall') return false;
+          if (tile === 'door') return false;
+          return true;
         },
-        tick(state) {
+        playerAction(state, action) {
+          if (action.type === 'move') {
+            const tx = state.entities.player.x + action.dx;
+            const ty = state.entities.player.y + action.dy;
+            if (this.canMove(state, tx, ty)) {
+              state.entities.player.x = tx;
+              state.entities.player.y = ty;
+              state.noise = Math.max(0, 2 - state.entities.player.emp);
+            }
+          }
+          if (action.type === 'wait') state.noise = 0;
+          if (action.type === 'emp' && state.entities.player.emp > 0) {
+            state.entities.player.emp -= 1;
+            for (const c of state.entities.cameras) {
+              if (state.utils.manhattan(c, state.entities.player) <= 3) c.disabled = 4;
+            }
+            state.render.log(state, 'EMP pulse: cameras disabled for 4 turns.', 'warn');
+          }
+        },
+        systemUpdate(state) {
+          const p = state.entities.player;
+          const i = state.utils.idx(state, p.x, p.y);
+          const tile = state.tiles[i];
+
+          for (const item of state.entities.items) {
+            if (!item.used && item.x === p.x && item.y === p.y) {
+              item.used = true;
+              if (item.type === 'emp') {
+                state.entities.player.emp += 2;
+                state.render.log(state, 'Picked EMP charge (+2).');
+              }
+            }
+          }
+
+          if (state.floor < 5 && tile === 'exit') {
+            state.floor += 1;
+            state.render.log(state, `Floor ${state.floor} entered.`);
+            startFloor(state);
+            return true;
+          }
+
+          if (state.floor === 5 && tile === 'core' && state.downloadProgress < state.downloadNeeded) {
+            state.downloadProgress += 1;
+            state.render.log(state, `Core download ${state.downloadProgress}/${state.downloadNeeded}.`, 'warn');
+          }
+
+          if (state.floor === 5 && tile === 'extraction' && state.downloadProgress >= state.downloadNeeded) {
+            state.mode = 'menu';
+            state.dom.menu.style.display = 'grid';
+            state.render.log(state, 'Run complete: Core exfiltration successful.', 'ok');
+          }
+          return false;
+        },
+        outcomeCheck(state) {
+          if (state.hp <= 0 || state.exposure >= 3 || state.alertLevel >= 100) {
+            state.mode = 'menu';
+            state.dom.menu.style.display = 'grid';
+            state.render.log(state, 'Mission failed: you were compromised.', 'danger');
+          }
+        },
+        processTurn(state, action) {
+          if (state.mode !== 'running') return;
+
+          // A: Input -> action
+          this.playerAction(state, action);
+          // B: Action resolved above
+          // C: System updates
+          const changedFloor = this.systemUpdate(state);
+          if (changedFloor) return;
+          state.fov.recalc(state);
+          state.detection.update(state);
+          // D: Enemy turn
+          state.ai.stepCameras(state);
+          state.ai.stepGuards(state);
+          // E: Outcome checks
+          this.outcomeCheck(state);
+
           state.turn += 1;
-          state.ai.stepEnemy(state);
+          state.render.frame(state);
+          state.storage.save(state);
         }
       },
 
@@ -344,28 +602,38 @@
         frame(state) {
           for (let y = 0; y < state.height; y++) {
             for (let x = 0; x < state.width; x++) {
-              const i = y * state.width + x;
+              const i = state.utils.idx(state, x, y);
               const cell = state.cellEls[i];
+              if (!state.memory[i]) {
+                cell.className = 'cell';
+                cell.style.opacity = 0.1;
+                cell.textContent = ' ';
+                continue;
+              }
               const tile = state.tiles[i];
               cell.className = `cell tile-${tile}`;
-              cell.textContent = '.';
+              cell.style.opacity = state.visible[i] ? 1 : 0.38;
+              cell.textContent = TILE_GLYPH[tile] || '?';
             }
           }
 
-          const drawEntity = (entity, cssClass) => {
-            const i = entity.y * state.width + entity.x;
+          const draw = (e, css, glyph = e.glyph) => {
+            const i = state.utils.idx(state, e.x, e.y);
+            if (!state.visible[i]) return;
             const cell = state.cellEls[i];
-            if (!cell || !state.fov.isVisible(entity.x, entity.y)) return;
-            cell.className = `cell ${cssClass}`;
-            cell.textContent = entity.glyph;
+            cell.className = `cell ${css}`;
+            cell.textContent = glyph;
           };
 
-          drawEntity(state.entities.player, 'tile-player');
-          drawEntity(state.entities.enemy, 'tile-enemy');
-          drawEntity(state.entities.exit, 'tile-exit');
+          draw(state.entities.player, 'tile-player');
+          for (const g of state.entities.guards) draw(g, 'tile-enemy', 'G');
+          for (const c of state.entities.cameras) draw(c, 'tile-enemy', c.disabled > 0 ? 'c' : 'C');
+          for (const item of state.entities.items) if (!item.used) draw(item, 'tile-floor', item.glyph);
 
-          state.dom.statusLeft.textContent = `HP: ${state.hp} | Noise: ${state.noise} | Turn: ${state.turn}`;
-          state.dom.statusRight.textContent = `Mode: ${state.mode}`;
+          const obj = LEVEL_OBJECTIVES[state.floor - 1];
+          state.dom.objective.textContent = obj;
+          state.dom.statusLeft.textContent = `HP:${state.hp} Noise:${state.noise} Turn:${state.turn} Exposure:${state.exposure} Alert:${state.alertLevel}`;
+          state.dom.statusRight.textContent = `Mode:${state.mode} Floor:${state.floor}/5 Download:${state.downloadProgress}/${state.downloadNeeded}`;
           state.dom.seed.textContent = String(state.seed ?? '—');
           state.dom.daily.textContent = state.daily ? 'Yes' : 'No';
         },
@@ -379,17 +647,12 @@
       },
 
       storage: {
-        key: 'stealth-roguelite-save-v1',
+        key: 'stealth-roguelite-save-v2',
         save(state) {
           const payload = {
-            turn: state.turn,
-            hp: state.hp,
-            noise: state.noise,
-            mode: state.mode,
-            daily: state.daily,
-            seed: state.seed,
-            tiles: state.tiles,
-            entities: state.entities
+            turn: state.turn, hp: state.hp, noise: state.noise, mode: state.mode, daily: state.daily, seed: state.seed,
+            floor: state.floor, tiles: state.tiles, memory: state.memory, visible: state.visible, alertLevel: state.alertLevel,
+            exposure: state.exposure, downloadProgress: state.downloadProgress, entities: state.entities
           };
           localStorage.setItem(this.key, JSON.stringify(payload));
         },
@@ -400,22 +663,31 @@
       }
     };
 
+    function startFloor(state) {
+      state.gen.map(state);
+      state.gen.populate(state);
+      state.fov.recalc(state);
+      state.render.frame(state);
+      state.storage.save(state);
+    }
+
     function initializeRun(type) {
       const today = new Date().toISOString().slice(0, 10);
       const seed = type === 'daily' ? `daily-${today}` : `run-${Date.now()}`;
-      const random = gameState.rng.create(seed);
-
+      gameState.random = gameState.rng.create(seed);
       gameState.turn = 1;
       gameState.mode = 'running';
       gameState.daily = type === 'daily';
       gameState.seed = seed;
-      gameState.entities.player = { x: 1, y: 1, glyph: '@' };
-      gameState.entities.enemy = { x: 11, y: 8, glyph: 'E' };
-      gameState.entities.exit = { x: 22, y: 14, glyph: 'X' };
+      gameState.floor = 1;
+      gameState.hp = 10;
+      gameState.noise = 0;
+      gameState.alertLevel = 0;
+      gameState.exposure = 0;
+      gameState.downloadProgress = 0;
+      gameState.entities.player = { x: 1, y: 1, glyph: '@', emp: 0 };
 
-      gameState.gen.map(gameState, random);
-      gameState.render.frame(gameState);
-      gameState.storage.save(gameState);
+      startFloor(gameState);
       gameState.render.log(gameState, `Run initialized with seed ${seed}`);
       gameState.dom.menu.style.display = 'none';
     }
@@ -429,13 +701,13 @@
       }
       Object.assign(gameState, data);
       gameState.mode = 'running';
+      gameState.fov.recalc(gameState);
       gameState.render.frame(gameState);
       gameState.render.log(gameState, 'Continue successful. Save restored.');
       gameState.dom.menu.style.display = 'none';
     }
 
     gameState.render.createGridOnce(gameState);
-    gameState.render.frame(gameState);
     gameState.render.log(gameState, 'Boot sequence complete. Choose startup option.');
 
     document.querySelector('.menu').addEventListener('click', (event) => {
@@ -446,41 +718,27 @@
       if (action === 'new-random') initializeRun('random');
       if (action === 'daily') initializeRun('daily');
       if (action === 'continue') continueRun();
-      if (action === 'help') gameState.render.log(gameState, 'How to play: Move silently, avoid E, reach X.', 'warn');
+      if (action === 'help') gameState.render.log(gameState, 'Arrows move, Space wait, E uses EMP near cameras.', 'warn');
       if (action === 'settings') gameState.render.log(gameState, 'Settings are not implemented in this prototype.', 'danger');
     });
 
     window.addEventListener('keydown', (event) => {
       if (gameState.mode !== 'running') return;
-      const moves = {
-        ArrowUp: [0, -1],
-        ArrowDown: [0, 1],
-        ArrowLeft: [-1, 0],
-        ArrowRight: [1, 0]
-      };
-      const dir = moves[event.key];
-      if (!dir) return;
-
-      event.preventDefault();
-      const [dx, dy] = dir;
-      const targetX = gameState.entities.player.x + dx;
-      const targetY = gameState.entities.player.y + dy;
-
-      if (gameState.rules.canMove(gameState, targetX, targetY)) {
-        gameState.entities.player.x = targetX;
-        gameState.entities.player.y = targetY;
-        gameState.rules.tick(gameState);
-        gameState.render.frame(gameState);
-        gameState.storage.save(gameState);
-
-        if (targetX === gameState.entities.exit.x && targetY === gameState.entities.exit.y) {
-          gameState.mode = 'menu';
-          gameState.render.frame(gameState);
-          gameState.dom.menu.style.display = 'grid';
-          gameState.render.log(gameState, 'Extraction complete. Mission success.', 'ok');
-        }
+      const moves = { ArrowUp: [0, -1], ArrowDown: [0, 1], ArrowLeft: [-1, 0], ArrowRight: [1, 0] };
+      let action = null;
+      if (moves[event.key]) {
+        const [dx, dy] = moves[event.key];
+        action = { type: 'move', dx, dy };
+      } else if (event.key === ' ' || event.key.toLowerCase() === 'z') {
+        action = { type: 'wait' };
+      } else if (event.key.toLowerCase() === 'e') {
+        action = { type: 'emp' };
       }
+      if (!action) return;
+      event.preventDefault();
+      gameState.rules.processTurn(gameState, action);
     });
   </script>
+
 </body>
 </html>
