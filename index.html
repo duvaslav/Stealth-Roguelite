@@ -127,6 +127,28 @@
       padding-bottom: 4px;
     }
 
+    .sidebar .seed-actions {
+      margin-top: 6px;
+    }
+
+    .sidebar .seed-actions button {
+      width: 100%;
+      border: 1px solid #35557e;
+      background: #0e1725;
+      color: var(--text);
+      font: inherit;
+      padding: 6px 8px;
+      cursor: pointer;
+    }
+
+    .sidebar .seed-actions button:hover,
+    .sidebar .seed-actions button:focus-visible {
+      outline: none;
+      border-color: var(--accent);
+      color: var(--accent);
+      background: #112236;
+    }
+
     .terminal-log {
       min-height: 140px;
       max-height: 200px;
@@ -213,6 +235,7 @@
         <div class="stat"><span>Daily</span><span id="daily-value">No</span></div>
         <div class="stat"><span>Objectives</span><span>Reach EXIT</span></div>
         <div class="stat"><span>Build</span><span>Prototype</span></div>
+        <div class="seed-actions"><button id="copy-seed" type="button">Copy seed</button></div>
       </aside>
     </main>
 
@@ -281,22 +304,19 @@
         seed: document.getElementById('seed-value'),
         daily: document.getElementById('daily-value'),
         menu: document.getElementById('menu-overlay'),
-        objective: document.querySelector('.stat:nth-of-type(3) span:last-child')
+        objective: document.querySelector('.stat:nth-of-type(3) span:last-child'),
+        copySeed: document.getElementById('copy-seed')
       },
       cellEls: [],
 
       rng: {
-        xmur3(seedStr) {
-          let h = 1779033703 ^ seedStr.length;
+        hashString(seedStr) {
+          let h = 2166136261;
           for (let i = 0; i < seedStr.length; i++) {
-            h = Math.imul(h ^ seedStr.charCodeAt(i), 3432918353);
-            h = (h << 13) | (h >>> 19);
+            h ^= seedStr.charCodeAt(i);
+            h = Math.imul(h, 16777619);
           }
-          return () => {
-            h = Math.imul(h ^ (h >>> 16), 2246822507);
-            h = Math.imul(h ^ (h >>> 13), 3266489909);
-            return (h ^= h >>> 16) >>> 0;
-          };
+          return h >>> 0;
         },
         mulberry32(a) {
           return () => {
@@ -307,8 +327,8 @@
           };
         },
         create(seedValue) {
-          const seedFn = this.xmur3(String(seedValue));
-          return this.mulberry32(seedFn());
+          const seedInt = this.hashString(String(seedValue));
+          return this.mulberry32(seedInt || 1);
         }
       },
 
@@ -316,14 +336,39 @@
         idx(state, x, y) { return y * state.width + x; },
         inBounds(state, x, y) { return x >= 0 && y >= 0 && x < state.width && y < state.height; },
         manhattan(a, b) { return Math.abs(a.x - b.x) + Math.abs(a.y - b.y); },
-        randomFloor(state) {
-          while (true) {
+        isWalkableTile(tile) {
+          return tile !== 'wall' && tile !== 'door';
+        },
+        bfsDistance(state, start, targets) {
+          const queue = [{ x: start.x, y: start.y, dist: 0 }];
+          const seen = new Set([`${start.x},${start.y}`]);
+          const wanted = new Set(targets.map((t) => `${t.x},${t.y}`));
+          while (queue.length) {
+            const node = queue.shift();
+            if (wanted.has(`${node.x},${node.y}`)) return node.dist;
+            for (const [dx, dy] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+              const nx = node.x + dx;
+              const ny = node.y + dy;
+              if (!this.inBounds(state, nx, ny)) continue;
+              const key = `${nx},${ny}`;
+              if (seen.has(key)) continue;
+              const tile = state.tiles[this.idx(state, nx, ny)];
+              if (!this.isWalkableTile(tile)) continue;
+              seen.add(key);
+              queue.push({ x: nx, y: ny, dist: node.dist + 1 });
+            }
+          }
+          return Infinity;
+        },
+        randomFloor(state, allowedTiles = ['floor']) {
+          for (let tries = 0; tries < 2000; tries++) {
             const x = 1 + Math.floor(state.random() * (state.width - 2));
             const y = 1 + Math.floor(state.random() * (state.height - 2));
             const tile = state.tiles[this.idx(state, x, y)];
             const occupied = this.getEntityAt(state, x, y);
-            if (tile === 'floor' && !occupied) return { x, y };
+            if (allowedTiles.includes(tile) && !occupied) return { x, y };
           }
+          throw new Error('Failed to find random floor tile');
         },
         getEntityAt(state, x, y) {
           if (state.entities.player.x === x && state.entities.player.y === y) return state.entities.player;
@@ -354,52 +399,191 @@
       },
 
       gen: {
-        map(state) {
-          const tiles = Array.from({ length: state.width * state.height }, () => 'floor');
-          for (let y = 0; y < state.height; y++) {
-            for (let x = 0; x < state.width; x++) {
-              const i = y * state.width + x;
-              if (x === 0 || y === 0 || x === state.width - 1 || y === state.height - 1 || state.random() < 0.08 + state.floor * 0.01) {
-                tiles[i] = 'wall';
-              }
+        carveRoom(state, tiles, room) {
+          for (let y = room.y; y < room.y + room.h; y++) {
+            for (let x = room.x; x < room.x + room.w; x++) {
+              tiles[y * state.width + x] = 'floor';
             }
           }
-          for (let i = 0; i < 8; i++) {
-            const p = state.utils.randomFloor({ ...state, tiles, entities: { player: {x:-1,y:-1}, guards: [], cameras: [], items: [] } });
-            tiles[p.y * state.width + p.x] = 'door';
+        },
+        carveLCorridor(state, tiles, a, b) {
+          const horizontalFirst = state.random() < 0.5;
+          const carveLine = (x0, y0, x1, y1) => {
+            let x = x0;
+            let y = y0;
+            while (x !== x1 || y !== y1) {
+              tiles[y * state.width + x] = 'floor';
+              if (x !== x1) x += x < x1 ? 1 : -1;
+              else if (y !== y1) y += y < y1 ? 1 : -1;
+            }
+            tiles[y1 * state.width + x1] = 'floor';
+          };
+          if (horizontalFirst) {
+            carveLine(a.x, a.y, b.x, a.y);
+            carveLine(b.x, a.y, b.x, b.y);
+          } else {
+            carveLine(a.x, a.y, a.x, b.y);
+            carveLine(a.x, b.y, b.x, b.y);
           }
-          state.tiles = tiles;
-          state.memory = Array(tiles.length).fill(false);
-          state.visible = Array(tiles.length).fill(false);
+        },
+        surroundFloorsWithWalls(state, tiles) {
+          for (let y = 1; y < state.height - 1; y++) {
+            for (let x = 1; x < state.width - 1; x++) {
+              const i = y * state.width + x;
+              if (tiles[i] !== 'void') continue;
+              let nearFloor = false;
+              for (let yy = -1; yy <= 1; yy++) {
+                for (let xx = -1; xx <= 1; xx++) {
+                  if (xx === 0 && yy === 0) continue;
+                  if (tiles[(y + yy) * state.width + (x + xx)] === 'floor') nearFloor = true;
+                }
+              }
+              if (nearFloor) tiles[i] = 'wall';
+            }
+          }
+          for (let i = 0; i < tiles.length; i++) {
+            if (tiles[i] === 'void') tiles[i] = 'wall';
+          }
+        },
+        roomsConnected(state, tiles, rooms) {
+          if (!rooms.length) return false;
+          const start = rooms[0].center;
+          const queue = [start];
+          const seen = new Set([`${start.x},${start.y}`]);
+          while (queue.length) {
+            const cur = queue.shift();
+            for (const [dx, dy] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+              const nx = cur.x + dx;
+              const ny = cur.y + dy;
+              if (!state.utils.inBounds(state, nx, ny)) continue;
+              const key = `${nx},${ny}`;
+              if (seen.has(key)) continue;
+              const t = tiles[ny * state.width + nx];
+              if (t !== 'floor') continue;
+              seen.add(key);
+              queue.push({ x: nx, y: ny });
+            }
+          }
+          return rooms.every((room) => seen.has(`${room.center.x},${room.center.y}`));
+        },
+        map(state) {
+          for (let attempt = 0; attempt < 60; attempt++) {
+            const tiles = Array.from({ length: state.width * state.height }, () => 'void');
+            const rooms = [];
+            const roomCount = 6 + Math.floor(state.random() * 5);
+
+            for (let i = 0; i < roomCount * 3 && rooms.length < roomCount; i++) {
+              const w = 3 + Math.floor(state.random() * 5);
+              const h = 3 + Math.floor(state.random() * 4);
+              const x = 1 + Math.floor(state.random() * (state.width - w - 2));
+              const y = 1 + Math.floor(state.random() * (state.height - h - 2));
+              const candidate = { x, y, w, h, center: { x: x + Math.floor(w / 2), y: y + Math.floor(h / 2) } };
+              const overlaps = rooms.some((room) =>
+                candidate.x < room.x + room.w + 1 &&
+                candidate.x + candidate.w + 1 > room.x &&
+                candidate.y < room.y + room.h + 1 &&
+                candidate.y + candidate.h + 1 > room.y);
+              if (overlaps) continue;
+              this.carveRoom(state, tiles, candidate);
+              if (rooms.length > 0) {
+                this.carveLCorridor(state, tiles, rooms[rooms.length - 1].center, candidate.center);
+              }
+              rooms.push(candidate);
+            }
+
+            if (rooms.length < 6) continue;
+            this.surroundFloorsWithWalls(state, tiles);
+
+            if (!this.roomsConnected(state, tiles, rooms)) continue;
+
+            state.tiles = tiles;
+            state.generatedRooms = rooms;
+            state.memory = Array(tiles.length).fill(false);
+            state.visible = Array(tiles.length).fill(false);
+            return;
+          }
+          throw new Error('Map generation failed to build connected rooms');
+        },
+        ensureReachability(state, origin, targetTileNames) {
+          const targets = [];
+          for (let y = 0; y < state.height; y++) {
+            for (let x = 0; x < state.width; x++) {
+              const tile = state.tiles[state.utils.idx(state, x, y)];
+              if (targetTileNames.includes(tile)) targets.push({ x, y });
+            }
+          }
+          return state.utils.bfsDistance(state, origin, targets) !== Infinity;
         },
         populate(state) {
-          state.entities.player = { ...state.utils.randomFloor(state), glyph: '@', emp: state.entities.player.emp || 0 };
           state.entities.guards = [];
           state.entities.cameras = [];
           state.entities.items = [];
 
-          const guardCount = 2 + state.floor;
-          const camCount = 1 + Math.floor(state.floor / 2);
-          for (let i = 0; i < guardCount; i++) {
-            const pos = state.utils.randomFloor(state);
-            state.entities.guards.push({ ...pos, glyph: 'G', state: 'patrol', hearing: 4 + state.floor, vision: 7, target: null, searchTurns: 0 });
+          const roomCenters = state.generatedRooms.map((r) => ({ ...r.center }));
+          const spawn = roomCenters.shift();
+          state.entities.player = { ...spawn, glyph: '@', emp: state.entities.player.emp || 0 };
+
+          const endpoint = roomCenters.pop() || state.utils.randomFloor(state);
+          const objectiveTile = state.floor === 5 ? 'core' : 'exit';
+          state.tiles[state.utils.idx(state, endpoint.x, endpoint.y)] = objectiveTile;
+
+          if (state.floor === 5) {
+            const extraction = roomCenters.pop() || state.utils.randomFloor(state);
+            state.tiles[state.utils.idx(state, extraction.x, extraction.y)] = 'extraction';
           }
-          for (let i = 0; i < camCount; i++) {
-            const pos = state.utils.randomFloor(state);
-            state.entities.cameras.push({ ...pos, glyph: 'C', type: i % 2 ? 'fixed' : 'rotating', angle: Math.floor(state.random() * 4), range: 6, disabled: 0 });
+
+          const terminalCount = Math.max(1, 1 + Math.floor(state.random() * 2));
+          for (let i = 0; i < terminalCount; i++) {
+            const terminal = state.utils.randomFloor(state);
+            state.tiles[state.utils.idx(state, terminal.x, terminal.y)] = 'terminal';
           }
-          for (let i = 0; i < 3; i++) {
+
+          const pickupCount = 1 + Math.floor(state.random() * 3);
+          for (let i = 0; i < pickupCount; i++) {
             const pos = state.utils.randomFloor(state);
             state.entities.items.push({ ...pos, glyph: i === 0 ? '⚡' : '•', type: i === 0 ? 'emp' : 'scrap', used: false });
           }
 
-          const terminal = state.utils.randomFloor(state);
-          state.tiles[state.utils.idx(state, terminal.x, terminal.y)] = 'terminal';
-          const objective = state.utils.randomFloor(state);
-          state.tiles[state.utils.idx(state, objective.x, objective.y)] = state.floor === 5 ? 'core' : 'exit';
-          if (state.floor === 5) {
-            const extraction = state.utils.randomFloor(state);
-            state.tiles[state.utils.idx(state, extraction.x, extraction.y)] = 'extraction';
+          let doorCount = 0;
+          for (let y = 1; y < state.height - 1; y++) {
+            for (let x = 1; x < state.width - 1; x++) {
+              const i = state.utils.idx(state, x, y);
+              if (state.tiles[i] !== 'floor') continue;
+              const left = state.tiles[state.utils.idx(state, x - 1, y)];
+              const right = state.tiles[state.utils.idx(state, x + 1, y)];
+              const up = state.tiles[state.utils.idx(state, x, y - 1)];
+              const down = state.tiles[state.utils.idx(state, x, y + 1)];
+              const horizontalGate = left === 'wall' && right === 'wall' && up === 'floor' && down === 'floor';
+              const verticalGate = up === 'wall' && down === 'wall' && left === 'floor' && right === 'floor';
+              if ((horizontalGate || verticalGate) && state.random() < 0.2) {
+                state.tiles[i] = 'door';
+                doorCount += 1;
+              }
+            }
+          }
+          for (let i = 0; i < 20 && doorCount < 2; i++) {
+            const p = state.utils.randomFloor(state);
+            state.tiles[state.utils.idx(state, p.x, p.y)] = 'door';
+            doorCount += 1;
+          }
+
+          const guardCount = Math.min(7, 1 + state.floor + Math.floor(state.floor / 2));
+          const camCount = Math.min(5, Math.floor((state.floor + 1) / 2));
+          for (let i = 0; i < guardCount; i++) {
+            const pos = state.utils.randomFloor(state);
+            state.entities.guards.push({ ...pos, glyph: 'G', state: 'patrol', hearing: 3 + state.floor, vision: 6 + Math.floor(state.floor / 2), target: null, searchTurns: 0 });
+          }
+          for (let i = 0; i < camCount; i++) {
+            const pos = state.utils.randomFloor(state);
+            state.entities.cameras.push({ ...pos, glyph: 'C', type: i % 2 ? 'fixed' : 'rotating', angle: Math.floor(state.random() * 4), range: 5 + Math.floor(state.floor / 2), disabled: 0 });
+          }
+
+          const goalTiles = state.floor === 5 ? ['core'] : ['exit'];
+          if (!this.ensureReachability(state, state.entities.player, goalTiles)) {
+            throw new Error('Player cannot reach level objective');
+          }
+          if (state.floor === 5 && !this.ensureReachability(state, state.entities.player, ['extraction'])) {
+            throw new Error('Player cannot reach extraction');
           }
         }
       },
@@ -664,16 +848,32 @@
     };
 
     function startFloor(state) {
-      state.gen.map(state);
-      state.gen.populate(state);
-      state.fov.recalc(state);
-      state.render.frame(state);
-      state.storage.save(state);
+      for (let attempt = 0; attempt < 20; attempt++) {
+        try {
+          state.gen.map(state);
+          state.gen.populate(state);
+          state.fov.recalc(state);
+          state.render.frame(state);
+          state.storage.save(state);
+          return;
+        } catch (error) {
+          state.render.log(state, `Regenerating floor: ${error.message}.`, 'warn');
+        }
+      }
+      throw new Error('Unable to generate valid floor after retries');
+    }
+
+    function getLocalDateSeed() {
+      const now = new Date();
+      const y = now.getFullYear();
+      const m = String(now.getMonth() + 1).padStart(2, '0');
+      const d = String(now.getDate()).padStart(2, '0');
+      return `${y}-${m}-${d}`;
     }
 
     function initializeRun(type) {
-      const today = new Date().toISOString().slice(0, 10);
-      const seed = type === 'daily' ? `daily-${today}` : `run-${Date.now()}`;
+      const today = getLocalDateSeed();
+      const seed = type === 'daily' ? `daily-${today}` : `run-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
       gameState.random = gameState.rng.create(seed);
       gameState.turn = 1;
       gameState.mode = 'running';
@@ -700,6 +900,7 @@
         return;
       }
       Object.assign(gameState, data);
+      gameState.random = gameState.rng.create(gameState.seed || `restore-${Date.now()}`);
       gameState.mode = 'running';
       gameState.fov.recalc(gameState);
       gameState.render.frame(gameState);
@@ -709,6 +910,20 @@
 
     gameState.render.createGridOnce(gameState);
     gameState.render.log(gameState, 'Boot sequence complete. Choose startup option.');
+
+
+    gameState.dom.copySeed.addEventListener('click', async () => {
+      if (!gameState.seed) {
+        gameState.render.log(gameState, 'No active seed to copy.', 'warn');
+        return;
+      }
+      try {
+        await navigator.clipboard.writeText(String(gameState.seed));
+        gameState.render.log(gameState, `Seed copied: ${gameState.seed}`);
+      } catch {
+        gameState.render.log(gameState, 'Clipboard unavailable in this environment.', 'warn');
+      }
+    });
 
     document.querySelector('.menu').addEventListener('click', (event) => {
       const btn = event.target.closest('button[data-action]');
